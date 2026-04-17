@@ -1,46 +1,55 @@
+# Aquaplaning Detection Dashboard
+
+A real‑time aquaplaning detection dashboard that combines:
+
+- Roboflow computer vision inference  
+- Risk scoring  
+- Vehicle telemetry (speed, tyre pressure, throttle availability)  
+- V2X event signalling  
+- GPS‑based map tracking  
+- Video playback with live overlays  
+
+The system processes dashcam footage, detects road surface conditions, calculates aquaplaning risk, and displays the vehicle’s real‑time position on a map. GPS logs are aligned 1:1 with each video (start → start, end → end).
 
 ---
 
-## 🧠 How It Works
+## 🚗 Features
 
-### **video_stream.py**
-- Loads video frames with OpenCV  
-- Sends frames to Roboflow for inference  
-- Draws predictions and warnings  
-- Streams frames to Dash via Flask route `/video_feed`
+### **Computer Vision (Roboflow)**
+- Detects: `dry`, `puddle`, `standingwater`
+- Runs inference once per second
+- Displays label + confidence on the video feed
 
-### **web_dashboard.py**
-- Builds the dashboard UI  
-- Lets the user select a video  
-- Adjusts speed and tyre pressure  
-- Displays:
-  - Risk %
-  - Confidence stats
-  - Road condition counts
-  - Vehicle speed, input, warnings
-  - V2X messages
+### **Risk Engine**
+- Calculates risk based on:
+  - Detection confidence  
+  - Road condition  
+  - Vehicle speed  
+  - Tyre pressure  
+- Automatic throttle reduction when risk is high  
+- Automatic recovery when safe  
 
-### **risk_calculator.py**
-- Computes risk based on:
-  - Road condition
-  - Confidence
-  - Speed
-  - Tyre pressure
+### **Vehicle Dashboard**
+- Live speed  
+- User available throttle input  
+- Warning overlay (“REDUCE SPEED”)  
+- V2X event messages  
+
+### **GPS Tracking**
+- GPS file matches video name (e.g., `WetRoad.mp4` → `WetRoad.txt`)
+- Each line contains:  
+  `timestamp: lon: lat`
+- Timestamps are ignored (you guarantee alignment)
+- Blue dot = current vehicle position  
+- Red dot = standing water V2X event  
+- Map updates once per second  
+
+### **UI Layout**
+- Stats panels at the top  
+- Video + Map side‑by‑side underneath  
+- Dark theme (Dash + Bootstrap)  
 
 ---
 
-## 🛠 Requirements
-
-- Python 3.10+
-- Internet connection (Roboflow inference)
-- A GPU is *not* required
-
----
-
-## 📡 Notes
-
-- The Roboflow API key is required for inference.
-- The dashboard updates every second using a Dash `Interval` component.
-- The system loops videos automatically when they reach the end.
-
+## 📁 File Structure
 
