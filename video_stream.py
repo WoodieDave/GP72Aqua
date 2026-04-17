@@ -1,10 +1,6 @@
 import cv2
-import os
 from inference_sdk import InferenceHTTPClient
 
-# -----------------------------
-# Roboflow Setup
-# -----------------------------
 CLIENT = InferenceHTTPClient(
     api_url="https://serverless.roboflow.com",
     api_key="5TZn9YOxt8duqqEw5eSV"
@@ -12,10 +8,7 @@ CLIENT = InferenceHTTPClient(
 
 MODEL_ID = "roadclass/2"
 
-# Shared flag controlled by Dash
 warning_flag = False
-
-# Shared callback (Dash will set this)
 stats_callback = None
 
 
@@ -29,9 +22,6 @@ def set_stats_callback(cb):
     stats_callback = cb
 
 
-# -----------------------------
-# Frame Generator for Dash
-# -----------------------------
 def frame_stream(video_path):
     global warning_flag, stats_callback
 
@@ -41,7 +31,7 @@ def frame_stream(video_path):
     if fps == 0:
         fps = 30
 
-    frames_per_2_seconds = int(fps * 1)
+    frames_per_second = int(fps)
     frame_count = 0
 
     last_label = "..."
@@ -51,12 +41,13 @@ def frame_stream(video_path):
         ret, frame = cap.read()
         if not ret:
             cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+            frame_count = 0
             continue
 
         frame_count += 1
 
-        # Run inference every N frames
-        if frame_count % frames_per_2_seconds == 0:
+        # Run inference once per second
+        if frame_count % frames_per_second == 0:
             small = cv2.resize(frame, (640, 360))
             result = CLIENT.infer(small, model_id=MODEL_ID)
             predictions = result.get("predictions", [])
@@ -69,7 +60,6 @@ def frame_stream(video_path):
                 last_label = pred["class"]
                 last_conf = pred["confidence"]
 
-            # Send stats back to Dash
             if stats_callback:
                 stats_callback(last_conf, last_label)
 

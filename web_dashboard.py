@@ -3,6 +3,8 @@ import dash
 from dash import dcc, html, Input, Output, State
 import dash_bootstrap_components as dbc
 from flask import Response
+import plotly.graph_objects as go
+import cv2
 
 from video_stream import frame_stream, set_warning_flag, set_stats_callback
 from risk_calculator import calculate_risk
@@ -13,15 +15,6 @@ from risk_calculator import calculate_risk
 VIDEO_FOLDER = "videos"
 app = dash.Dash(__name__, external_stylesheets=[dbc.themes.DARKLY])
 server = app.server
-
-# -----------------------------
-# Video List
-# -----------------------------
-def get_video_list():
-    return [
-        f for f in os.listdir(VIDEO_FOLDER)
-        if f.lower().endswith((".mp4", ".avi", ".mov", ".mkv"))
-    ]
 
 # -----------------------------
 # Global Stats & State
@@ -48,6 +41,12 @@ stats = {
     "warning": False,
 
     "v2x_message": "",
+
+    # GPS
+    "gps_points": [],      # list of {"lat": ..., "lon": ...}
+    "gps_index": 0,        # current index into gps_points
+    "gps_lat": None,
+    "gps_lon": None,
 }
 
 throttle_reduction_active = False
@@ -55,12 +54,66 @@ safe_counter = 0
 current_video_path = None
 
 # -----------------------------
+# GPS Loader
+# -----------------------------
+def load_gps_file(video_name):
+    """
+    GPS file shares base name with video.
+    Each line: TIMESTAMP: lon: lat
+    We ignore the timestamp (you've guaranteed alignment) and just
+    store lon/lat in order.
+    """
+    base, _ = os.path.splitext(video_name)
+    gps_file = base + ".txt"
+    gps_path = os.path.join(VIDEO_FOLDER, gps_file)
+
+    gps_points = []
+    if os.path.exists(gps_path):
+        with open(gps_path, "r") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+
+                parts = line.split(":")
+                if len(parts) < 3:
+                    continue
+
+                try:
+                    lon = float(parts[-2].strip())
+                    lat = float(parts[-1].strip())
+                except ValueError:
+                    continue
+
+                gps_points.append({"lat": lat, "lon": lon})
+
+    return gps_points
+
+
+def advance_gps_index():
+    """
+    Advance gps_index by one, clamp at end.
+    Called once per stats interval (1 second) to keep GPS in sync
+    with video, since you've guaranteed the GPS file spans exactly
+    the video duration.
+    """
+    if not stats["gps_points"]:
+        return
+
+    if stats["gps_index"] < len(stats["gps_points"]) - 1:
+        stats["gps_index"] += 1
+
+    point = stats["gps_points"][stats["gps_index"]]
+    stats["gps_lat"] = point["lat"]
+    stats["gps_lon"] = point["lon"]
+
+# -----------------------------
 # Detection Stats Callback
 # -----------------------------
 def detection_stats_callback(confidence, label):
     global throttle_reduction_active, safe_counter
 
-    # --- Confidence Stats ---
+    # Confidence stats
     if stats["min_conf"] is None or confidence < stats["min_conf"]:
         stats["min_conf"] = confidence
     if stats["max_conf"] is None or confidence > stats["max_conf"]:
@@ -69,7 +122,7 @@ def detection_stats_callback(confidence, label):
     stats["sum_conf"] += confidence
     stats["count_conf"] += 1
 
-    # --- Road Condition Stats ---
+    # Road condition stats
     if label == "dry":
         stats["dry"] += 1
         stats["v2x_message"] = ""
@@ -80,7 +133,15 @@ def detection_stats_callback(confidence, label):
 
     elif label == "standingwater":
         stats["standing"] += 1
-        stats["v2x_message"] = "V2X: Transmitting Standing Water at X:123 Y:456"
+
+        # Use current GPS position for V2X
+        if stats["gps_lat"] is not None and stats["gps_lon"] is not None:
+            stats["v2x_message"] = (
+                f"V2X: Standing Water at Lat {stats['gps_lat']:.5f}, "
+                f"Lon {stats['gps_lon']:.5f}"
+            )
+        else:
+            stats["v2x_message"] = "V2X: Standing Water (No GPS available)"
 
     conds = {
         "Dry": stats["dry"],
@@ -89,10 +150,9 @@ def detection_stats_callback(confidence, label):
     }
     stats["overall"] = max(conds, key=conds.get)
 
-    # --- Risk Calculation ---
+    # Risk calculation
     speed = stats["speed"]
     pressure = stats["pressure"]
-
     risk = calculate_risk(confidence, label, speed, pressure)
     risk_percent = risk * 100
 
@@ -103,28 +163,22 @@ def detection_stats_callback(confidence, label):
         / stats["risk_count"]
     )
 
-    # ----------------------------------------------------
-    # USER AVAILABLE INPUT + SPEED REDUCTION LOGIC
-    # ----------------------------------------------------
+    # Speed reduction logic
     if risk_percent > 75:
         throttle_reduction_active = True
         safe_counter = 0
-
         stats["user_input"] = max(0, stats["user_input"] - 10)
         stats["speed"] = max(0, stats["speed"] * 0.9)
 
     elif risk_percent < 60:
         if throttle_reduction_active:
             safe_counter += 1
-
             if safe_counter >= 4:
                 throttle_reduction_active = False
                 stats["user_input"] = 100
                 stats["speed"] = stats["speed_input_value"]
 
-    # ----------------------------------------------------
-    # WARNING LOGIC + V2X CLEARING
-    # ----------------------------------------------------
+    # Warning logic
     if risk_percent > 60:
         stats["warning"] = True
         safe_counter = 0
@@ -133,7 +187,7 @@ def detection_stats_callback(confidence, label):
             safe_counter += 1
             if safe_counter >= 4:
                 stats["warning"] = False
-                stats["v2x_message"] = ""   # NEW: clear V2X when warning clears
+                stats["v2x_message"] = ""
 
     set_warning_flag(stats["warning"])
 
@@ -148,17 +202,26 @@ def video_feed():
     global current_video_path
     if not current_video_path:
         return "No video selected", 400
-    return Response(frame_stream(current_video_path), mimetype="multipart/x-mixed-replace; boundary=frame")
+    return Response(
+        frame_stream(current_video_path),
+        mimetype="multipart/x-mixed-replace; boundary=frame",
+    )
 
 # -----------------------------
-# Layout (NO SIDEBAR)
+# Layout
 # -----------------------------
+def get_video_list():
+    return [
+        f for f in os.listdir(VIDEO_FOLDER)
+        if f.lower().endswith((".mp4", ".avi", ".mov", ".mkv"))
+    ]
+
+
 overview_layout = html.Div(
     [
         html.H2("Aquaplaning Detection Dashboard"),
         html.Hr(),
 
-        # --- Video Selection ---
         html.H4("Select Video"),
         dcc.Dropdown(
             id="video-select",
@@ -167,14 +230,20 @@ overview_layout = html.Div(
             style={"width": "50%"},
         ),
 
-        # --- Speed & Tyre Pressure ---
+        # Speed & Pressure
         html.Div(
             [
                 dbc.InputGroup(
                     [
                         dbc.InputGroupText("Vehicle Speed (km/h)"),
                         dbc.Button("-", id="speed-minus", color="secondary"),
-                        dbc.Input(id="speed-input", type="number", value=60, min=0, max=200),
+                        dbc.Input(
+                            id="speed-input",
+                            type="number",
+                            value=60,
+                            min=0,
+                            max=200,
+                        ),
                         dbc.Button("+", id="speed-plus", color="secondary"),
                     ],
                     className="mb-2",
@@ -183,7 +252,13 @@ overview_layout = html.Div(
                     [
                         dbc.InputGroupText("Tyre Pressure (PSI)"),
                         dbc.Button("-", id="pressure-minus", color="secondary"),
-                        dbc.Input(id="pressure-input", type="number", value=32, min=10, max=50),
+                        dbc.Input(
+                            id="pressure-input",
+                            type="number",
+                            value=32,
+                            min=10,
+                            max=50,
+                        ),
                         dbc.Button("+", id="pressure-plus", color="secondary"),
                     ],
                     className="mb-2",
@@ -192,12 +267,17 @@ overview_layout = html.Div(
             style={"marginTop": "20px", "maxWidth": "500px"},
         ),
 
-        dbc.Button("Start Detection", id="start-detection-btn", color="primary", className="mt-3"),
+        dbc.Button(
+            "Start Detection",
+            id="start-detection-btn",
+            color="primary",
+            className="mt-3",
+        ),
         html.Div(id="detection-status", className="mt-3"),
 
         html.Hr(),
 
-        # --- Stats + Vehicle Dash ---
+        # Stats + Vehicle Dash
         dbc.Row(
             [
                 dbc.Col(
@@ -220,7 +300,6 @@ overview_layout = html.Div(
                     ],
                     md=4,
                 ),
-
                 dbc.Col(
                     [
                         html.H4("Road Condition Stats"),
@@ -235,14 +314,29 @@ overview_layout = html.Div(
                     ],
                     md=4,
                 ),
-
                 dbc.Col(
                     [
                         html.H4("Vehicle Dash"),
-                        html.Div(id="vehicle-speed", style={"fontSize": "24px", "fontWeight": "bold"}),
-                        html.Div(id="vehicle-input", style={"fontSize": "20px"}),
-                        html.Div(id="vehicle-warning", style={"fontSize": "22px", "fontWeight": "bold", "color": "red"}),
-                        html.Div(id="vehicle-v2x", style={"fontSize": "18px", "color": "#00eaff"}),
+                        html.Div(
+                            id="vehicle-speed",
+                            style={"fontSize": "24px", "fontWeight": "bold"},
+                        ),
+                        html.Div(
+                            id="vehicle-input",
+                            style={"fontSize": "20px"},
+                        ),
+                        html.Div(
+                            id="vehicle-warning",
+                            style={
+                                "fontSize": "22px",
+                                "fontWeight": "bold",
+                                "color": "red",
+                            },
+                        ),
+                        html.Div(
+                            id="vehicle-v2x",
+                            style={"fontSize": "18px", "color": "#00eaff"},
+                        ),
                     ],
                     md=4,
                 ),
@@ -250,12 +344,41 @@ overview_layout = html.Div(
         ),
 
         html.Hr(),
-        html.H4("Video Preview"),
-        html.Img(
-            id="video-stream",
-            src="",
-            style={"width": "100%", "maxWidth": "800px", "border": "2px solid #444"},
+        html.H4("Video & Map"),
+
+        dbc.Row(
+            [
+                dbc.Col(
+                    [
+                        html.Img(
+                            id="video-stream",
+                            src="",
+                            style={
+                                "width": "100%",
+                                "border": "2px solid #444",
+                                "maxHeight": "450px",
+                                "objectFit": "cover",
+                            },
+                        ),
+                    ],
+                    md=8,
+                ),
+                dbc.Col(
+                    [
+                        dcc.Graph(
+                            id="gps-map",
+                            style={
+                                "height": "450px",
+                                "border": "2px solid #444",
+                            },
+                        )
+                    ],
+                    md=4,
+                ),
+            ]
         ),
+
+        html.Hr(),
 
         dcc.Interval(id="stats-interval", interval=1000, n_intervals=0),
     ],
@@ -302,8 +425,15 @@ def start_detection(n, selected_video, speed_value, pressure_value):
     stats["warning"] = False
     stats["v2x_message"] = ""
 
+    # Reset GPS
+    stats["gps_points"] = load_gps_file(selected_video)
+    stats["gps_index"] = 0
+    stats["gps_lat"] = None
+    stats["gps_lon"] = None
+
     current_video_path = os.path.join(VIDEO_FOLDER, selected_video)
     return "/video_feed", f"Detection started on {selected_video}"
+
 
 # Speed adjust
 @app.callback(
@@ -324,6 +454,7 @@ def adjust_speed(minus, plus, current):
         return min(200, current + 1)
     return current
 
+
 # Pressure adjust
 @app.callback(
     Output("pressure-input", "value"),
@@ -343,7 +474,8 @@ def adjust_pressure(minus, plus, current):
         return min(50, current + 1)
     return current
 
-# Live stats update
+
+# Live stats update + GPS advance
 @app.callback(
     [
         Output("risk-current", "children"),
@@ -363,6 +495,9 @@ def adjust_pressure(minus, plus, current):
     Input("stats-interval", "n_intervals"),
 )
 def update_stats(_):
+    # Advance GPS index once per second
+    advance_gps_index()
+
     if stats["count_conf"] > 0:
         avg_conf = stats["sum_conf"] / stats["count_conf"]
     else:
@@ -387,6 +522,63 @@ def update_stats(_):
         warning_text,
         stats["v2x_message"],
     )
+
+
+# Map update
+@app.callback(
+    Output("gps-map", "figure"),
+    Input("stats-interval", "n_intervals"),
+)
+def update_map(_):
+    lat = stats["gps_lat"]
+    lon = stats["gps_lon"]
+
+    if lat is None or lon is None:
+        return go.Figure(
+            layout=go.Layout(
+                template="plotly_dark",
+                title="GPS Position (Waiting for data)",
+            )
+        )
+
+    fig = go.Figure()
+
+    # BLUE DOT — current car position
+    fig.add_trace(
+        go.Scattermapbox(
+            lat=[lat],
+            lon=[lon],
+            mode="markers",
+            marker=dict(size=16, color="blue"),
+            name="Current Position",
+        )
+    )
+
+    # RED DOT — V2X event (same position, only when message present)
+    if stats["v2x_message"]:
+        fig.add_trace(
+            go.Scattermapbox(
+                lat=[lat],
+                lon=[lon],
+                mode="markers",
+                marker=dict(size=20, color="red"),
+                name="Standing Water",
+            )
+        )
+
+    fig.update_layout(
+        mapbox=dict(
+            style="open-street-map",
+            zoom=15,
+            center=dict(lat=lat, lon=lon),
+        ),
+        margin=dict(l=0, r=0, t=30, b=0),
+        template="plotly_dark",
+        showlegend=False,
+    )
+
+    return fig
+
 
 if __name__ == "__main__":
     app.run(debug=True)

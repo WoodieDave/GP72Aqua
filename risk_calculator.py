@@ -1,5 +1,3 @@
-# risk_calculator.py
-
 def calculate_risk(confidence, label, speed, pressure):
     weights = {
         "dry": 0.1,
