@@ -43,17 +43,4 @@
 - The dashboard updates every second using a Dash `Interval` component.
 - The system loops videos automatically when they reach the end.
 
----
 
-## 🧩 Future Improvements (Optional)
-
-- Add logging of risk events  
-- Add a sidebar for navigation  
-- Add a settings page for API keys  
-- Add a real vehicle‑style gauge cluster  
-
----
-
-## 📬 Support
-
-If you want help restructuring the project again, adding new features, or cleaning up the UI, just ask.
